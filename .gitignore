@@ -1,1 +1,7 @@
 *.swp
+bashmagic/
+data/
+*.out
+spodernet/
+__pycache__/
+ROBOKOP_30fd_baseline2_CCDD_noSubclassOf/
