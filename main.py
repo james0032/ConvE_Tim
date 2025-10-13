@@ -9,6 +9,8 @@ import math
 
 from os.path import join
 import torch.backends.cudnn as cudnn
+from torch.cuda.amp import autocast, GradScaler
+
 
 from evaluation import ranking_and_hits
 from model import ConvE, DistMult, Complex
@@ -31,13 +33,29 @@ np.set_printoptions(precision=3)
 
 cudnn.benchmark = True
 
+# Create checkpoints - this is used to save the model state during training; added by DamiOsh
+def save_checkpoint(model, optimizer, epoch, loss, model_dir):
+    os.makedirs(model_dir, exist_ok=True)
+    checkpoint_path = os.path.join(model_dir, f'model.ckpt-epoch{epoch:04d}.pt')
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': loss,
+    }, checkpoint_path)
+    print(f"[Checkpoint] Saved at: {checkpoint_path}")
 
 ''' Preprocess knowledge graph using spodernet. '''
-def preprocess(dataset_name, delete_data=False):
-    full_path = 'data/{0}/e1rel_to_e2_full.json'.format(dataset_name)
-    train_path = 'data/{0}/e1rel_to_e2_train.json'.format(dataset_name)
-    dev_ranking_path = 'data/{0}/e1rel_to_e2_ranking_dev.json'.format(dataset_name)
-    test_ranking_path = 'data/{0}/e1rel_to_e2_ranking_test.json'.format(dataset_name)
+def preprocess(data_dir, delete_data=False):
+    # full_path = 'data/{0}/e1rel_to_e2_full.json'.format(dataset_name)
+    # train_path = 'data/{0}/e1rel_to_e2_train.json'.format(dataset_name)
+    # dev_ranking_path = 'data/{0}/e1rel_to_e2_ranking_dev.json'.format(dataset_name)
+    # test_ranking_path = 'data/{0}/e1rel_to_e2_ranking_test.json'.format(dataset_name)
+    full_path = os.path.join(data_dir, 'e1rel_to_e2_full.json')
+    train_path = os.path.join(data_dir, 'e1rel_to_e2_train.json')
+    dev_ranking_path = os.path.join(data_dir, 'e1rel_to_e2_ranking_dev.json')
+    test_ranking_path = os.path.join(data_dir, 'e1rel_to_e2_ranking_test.json')
+
 
     keys2keys = {}
     keys2keys['e1'] = 'e1' # entities
@@ -53,7 +71,7 @@ def preprocess(dataset_name, delete_data=False):
 
     # process full vocabulary and save it to disk
     d.set_path(full_path)
-    p = Pipeline(args.data, delete_data, keys=input_keys, skip_transformation=True)
+    p = Pipeline(data_dir, delete_data, keys=input_keys, skip_transformation=True)
     p.add_sent_processor(ToLower())
     p.add_sent_processor(CustomTokenizer(lambda x: x.split(' ')),keys=['e2_multi1', 'e2_multi2'])
     p.add_token_processor(AddToVocab())
@@ -74,7 +92,8 @@ def preprocess(dataset_name, delete_data=False):
 
 
 def main(args, model_path):
-    if args.preprocess: preprocess(args.data, delete_data=True)
+    dataset_name = os.path.basename(os.path.normpath(args.data))
+    if args.preprocess: preprocess(args.data, delete_data=False)
     input_keys = ['e1', 'rel', 'rel_eval', 'e2', 'e2_multi1', 'e2_multi2']
     p = Pipeline(args.data, keys=input_keys)
     p.load_vocabs()
@@ -131,24 +150,79 @@ def main(args, model_path):
     print(params)
     print(np.sum(params))
 
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.l2)
+    ##### Using amp for mixed precision training #####
+    # --- AMP Implementation Start ---
+    if args.use_amp:
+        if device.type == 'cuda':
+            print("Using automatic mixed precision (AMP) for training.")
+            scaler = GradScaler()
+        else:
+            print("AMP is enabled but a CUDA device is not available. Running in FP32.")
+            scaler = None
+    else:
+        scaler = None
+
+    opt = torch.optim.Adam(model.parameters(), lr=args.lr,  weight_decay=args.l2)
+
     for epoch in range(args.epochs):
         model.train()
-        for i, str2var in enumerate(train_batcher):
+        total_loss = 0.0
+        loss_fn = torch.nn.BCEWithLogitsLoss() # Use BCEWithLogitsLoss for binary classification for autograd
+        for batch_data in train_batcher:
+            e1 = batch_data['e1'].to(device)
+            rel = batch_data['rel'].to(device)
+            e2_multi1_binary = batch_data['e2_multi1_binary'].to(device).float()
+            
+            # Add label smoothing (missing in Code 1)
+            e2_multi1_binary = ((1.0-args.label_smoothing)*e2_multi1_binary) + (1.0/e2_multi1_binary.size(1))
+
             opt.zero_grad()
-            e1 = str2var['e1']
-            rel = str2var['rel']
-            e2_multi = str2var['e2_multi1_binary'].float()
-            # label smoothing
-            e2_multi = ((1.0-args.label_smoothing)*e2_multi) + (1.0/e2_multi.size(1))
 
-            pred = model.forward(e1, rel)
-            loss = model.loss(pred, e2_multi)
-            loss.backward()
-            opt.step()
+            with autocast(enabled=args.use_amp and device.type == 'cuda'):
+                pred = model.forward(e1, rel)
+                loss = loss_fn(pred, e2_multi1_binary)
 
+            if scaler:
+                scaler.scale(loss).backward()
+                scaler.step(opt)
+                scaler.update()
+            else:
+                loss.backward()
+                opt.step()
+
+            # Add loss tracking (missing in Code 1)
+            total_loss += loss.item()
             train_batcher.state.loss = loss.cpu()
 
+    #### End of amp addition #####
+
+
+   
+    #### Original ConvE training loop - commented out and replaced by the above AMP version ####
+    # opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.l2)
+    # for epoch in range(args.epochs):
+    #     model.train()
+    #     total_loss = 0.0  # Initialize total loss for the epoch. Added by DamiOsh
+    #     for i, str2var in enumerate(train_batcher):
+    #         opt.zero_grad()
+    #         e1 = str2var['e1']
+    #         rel = str2var['rel']
+    #         e2_multi = str2var['e2_multi1_binary'].float()
+    #         # label smoothing
+    #         e2_multi = ((1.0-args.label_smoothing)*e2_multi) + (1.0/e2_multi.size(1))
+
+    #         pred = model.forward(e1, rel)
+    #         loss = model.loss(pred, e2_multi)
+    #         loss.backward()
+    #         opt.step()
+
+    #         train_batcher.state.loss = loss.cpu()
+
+# Save the checkpoint here: added by DamiOsh
+        #total_loss += loss.item()  # Accumulate loss for the checkpoint. Added by DamiOsh
+        checkpoint_dir = os.path.join(args.data, 'checkpoints')
+        if (epoch + 1) % 5 == 0:
+            save_checkpoint(model, opt, epoch, total_loss, model_dir=checkpoint_dir)
 
         print('saving to {0}'.format(model_path))
         torch.save(model.state_dict(), model_path)
@@ -164,6 +238,7 @@ def main(args, model_path):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Link prediction for knowledge graphs')
+    parser.add_argument('--use_amp', action='store_true', help='Use automatic mixed precision (AMP) training.')
     parser.add_argument('--batch-size', type=int, default=128, help='input batch size for training (default: 128)')
     parser.add_argument('--test-batch-size', type=int, default=128, help='input batch size for testing/validation (default: 128)')
     parser.add_argument('--epochs', type=int, default=1000, help='number of epochs to train (default: 1000)')
@@ -198,7 +273,8 @@ if __name__ == '__main__':
 
 
     model_name = '{2}_{0}_{1}'.format(args.input_drop, args.hidden_drop, args.model)
-    model_path = 'saved_models/{0}_{1}.model'.format(args.data, model_name)
+    #model_path = 'saved_models/{0}_{1}.model'.format(args.data, model_name)
+    model_path = os.path.join(args.data, f"{model_name}.model")
 
     torch.manual_seed(args.seed)
     main(args, model_path)

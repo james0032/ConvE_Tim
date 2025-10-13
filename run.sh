@@ -19,13 +19,16 @@
 # Run the ConvE training script
 #export PYTHONPATH=$PYTHONPATH:/work/users/d/o/damiosh/ConvE/spodernet:/work/users/d/o/damiosh/ConvE/bashmagic
 export PYTHONPATH=$PYTHONPATH:/proj/jchunglab/projects/ec_moa/ConvE_2DCNN/ConvE_benchmark/spodernet:/proj/jchunglab/projects/ec_moa/ConvE_2DCNN/ConvE_benchmark/bashmagic
+export SPO_DATA_PATH=/work/users/d/o/damiosh/.data
+export LOGDIR="/work/users/d/o/damiosh/.data/logs"
+
 
 #python main.py --model conve --data FB15k-237 --preprocess
 #python main.py --model conve --data matrix_subgraph --preprocess
 #python main.py --model conve --data ROBOKOP_30fd_baseline2_CCDD_noSubclassOf --preprocess
 #python main.py --data ROBOKOP_30fd_baseline2_CCDD_noSubclassOf --preprocess
 #python main.py --model conve --data ROBOKOP_30fd_baseline2_CCGGDD_noSubclassOf --preprocess
-python main.py --model conve --data FB15k-237 --input-drop 0.2 --hidden-drop 0.3 --feat-drop 0.2  --lr 0.003 --preprocess
+python main.py --model conve --data /proj/jchunglab/projects/ec_moa/ConvE_2DCNN/gits/ConvE_Tim/data/ROBOKOP_30fd_CGGD_withSubclassOf --input-drop 0.2 --hidden-drop 0.3 --feat-drop 0.2  --lr 0.003 --epochs 40 --use_amp --preprocess
 
 #python model.py
 # Run the evaluation script
