@@ -168,7 +168,7 @@ def main(args, model_path):
         model.train()
         total_loss = 0.0
         loss_fn = torch.nn.BCEWithLogitsLoss() # Use BCEWithLogitsLoss for binary classification for autograd
-        for batch_data in train_batcher:
+        for batch_idx, batch_data in enumerate(train_batcher):
             e1 = batch_data['e1'].to(device)
             rel = batch_data['rel'].to(device)
             e2_multi1_binary = batch_data['e2_multi1_binary'].to(device).float()
@@ -189,6 +189,10 @@ def main(args, model_path):
             else:
                 loss.backward()
                 opt.step()
+
+                # Clear cache every 100 batches
+            if batch_idx % 100 == 0:
+                torch.cuda.empty_cache()
 
             # Add loss tracking (missing in Code 1)
             total_loss += loss.item()
